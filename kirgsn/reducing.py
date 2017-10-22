@@ -2,8 +2,28 @@
 Author: Kirgsn, 2017
 """
 import numpy as np
+import pandas as pd
 import time
 import gc
+from joblib import Parallel, delayed
+from multiprocessing import cpu_count
+
+
+def measure_time_mem(func):
+    def wrapped_reduce(self, df, *args, **kwargs):
+        # pre
+        mem_usage_orig = df.memory_usage().sum() / self.memory_scale_factor
+        start_time = time.time()
+        # exec
+        ret = func(self, df, *args, **kwargs)
+        # post
+        mem_usage_new = ret.memory_usage().sum() / self.memory_scale_factor
+        end_time = time.time()
+        print('reduced df from {:.4} MB to {:.4} MB in {:.2} seconds'.format(
+            mem_usage_orig, mem_usage_new, (end_time - start_time)))
+        gc.collect()
+        return ret
+    return wrapped_reduce
 
 
 class Reducer:
@@ -22,13 +42,16 @@ class Reducer:
                 {'int': [np.int8, np.int16, np.int32, np.int64],
                  'uint': [np.uint8, np.uint16, np.uint32, np.uint64],
                  'float': [np.float16, np.float32, ]}
+        else:
+            self.conversion_table = conv_table
 
     def _type_candidates(self, k):
         for c in self.conversion_table[k]:
             i = np.iinfo(c) if 'int' in k else np.finfo(c)
             yield c, i
 
-    def reduce(self, df, verbose=True):
+    @measure_time_mem
+    def reduce(self, df, verbose=False):
         """Takes a dataframe and returns it with all data transformed to the
         smallest necessary types.
 
@@ -36,35 +59,34 @@ class Reducer:
         :param verbose: If True, outputs more information
         :return: pandas dataframe with reduced data types
         """
-        mem_usage_orig = df.memory_usage().sum() / self.memory_scale_factor
-        start_time = time.time()
-        for col in df.columns:
-            # skip NaNs
-            if df[col].isnull().any():
-                if verbose:
-                    print(col, 'has NaNs - Skip..')
-                continue
-            # detect kind of type
-            coltype = df[col].dtype
-            if np.issubdtype(coltype, np.integer):
-                conv_key = 'int' if df[col].min() < 0 else 'uint'
-            elif np.issubdtype(coltype, np.float):
-                conv_key = 'float'
-            else:
-                if verbose:
-                    print(col, 'is', coltype, '- Skip..')
-                continue
-            # find right candidate
-            for cand, cand_info in self._type_candidates(conv_key):
-                if df[col].max() <= cand_info.max and \
-                                df[col].min() >= cand_info.min:
-                    df[col] = df[col].astype(cand)
-                    if verbose:
-                        print('convert', col, 'to', str(cand))
-                    break
-        mem_usage_new = df.memory_usage().sum() / self.memory_scale_factor
-        end_time = time.time()
-        print('reduced df from {:.4} MB to {:.4} MB in {:.2} seconds'.format(
-            mem_usage_orig, mem_usage_new, (end_time - start_time)))
+        ret_list = Parallel(n_jobs=cpu_count())(delayed(self._reduce)
+                                                (df[c], c, verbose) for c in
+                                                df.columns)
+        del df
         gc.collect()
-        return df
+        return pd.concat(ret_list, axis=1)
+
+    def _reduce(self, s, colname, verbose):
+        # skip NaNs
+        if s.isnull().any():
+            if verbose:
+                print(colname, 'has NaNs - Skip..')
+            return
+        # detect kind of type
+        coltype = s.dtype
+        if np.issubdtype(coltype, np.integer):
+            conv_key = 'int' if s.min() < 0 else 'uint'
+        elif np.issubdtype(coltype, np.float):
+            conv_key = 'float'
+        else:
+            if verbose:
+                print(colname, 'is', coltype, '- Skip..')
+            return
+        # find right candidate
+        for cand, cand_info in self._type_candidates(conv_key):
+            if s.max() <= cand_info.max and s.min() >= cand_info.min:
+
+                if verbose:
+                    print('convert', colname, 'to', str(cand))
+                return s.astype(cand)
+

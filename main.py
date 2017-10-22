@@ -7,33 +7,27 @@ from joblib import Parallel, delayed
 import gc
 import uuid
 from os.path import join
-from itertools import accumulate, combinations
 
 import pandas as pd
 from catboost import CatBoostClassifier
 from sklearn.model_selection import StratifiedKFold
-from sklearn.random_projection import GaussianRandomProjection
-from sklearn.random_projection import SparseRandomProjection
-from sklearn.decomposition import PCA, FastICA
-from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import ElasticNetCV, LassoLarsCV
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.utils import check_array
 from sklearn.base import BaseEstimator,TransformerMixin, ClassifierMixin
-from sklearn.preprocessing import OneHotEncoder
 from sklearn import metrics
 
-from kirgsn import reducing
 from kirgsn import feature_engineering
 
-SEED = 2017
+SEED = 1990
 TESTSIZE = 0.20
 TESTSPLITS = int(1 / TESTSIZE)
 N_COMP_PREPROCESSING = 10
 DEBUG_FLAG = False
 DECOMP_FLAG = True
 ACCUMULATE_BINS_FLAG = True
+LOAD_FEATS = True
 
 cat_folder = 'cat_training'
 path_feature_importances = join('out', 'feature_importance')
@@ -55,16 +49,6 @@ params_cat = {'iterations': 1500,
               'use_best_model': True,
               'train_dir': cat_folder,
               }
-
-# combinations for multiplied features
-float_combs = [('ps_car_13', 'ps_reg_03'),  # magic
-                 # following had high pearson corr
-                 ('ps_reg_01', 'ps_reg_02'),
-                 ('ps_reg_01', 'ps_reg_03'),
-                 ('ps_reg_02', 'ps_reg_03'),
-                 ('ps_car_12', 'ps_car_13'),
-                 ('ps_car_13', 'ps_car_15'),
-               ]
 
 
 class GiniMetric(object):
@@ -129,36 +113,6 @@ def gini_lgb(actuals, preds):
 gini_sklearn = metrics.make_scorer(ngini, True, True)
 
 
-def one_hot_encode(_train, _test, _cols):
-    OHenc = OneHotEncoder()
-    label_fitting_frame = \
-        _train[_cols].append(_test[_cols])
-    OHenc.fit(label_fitting_frame)
-    del label_fitting_frame
-    OH_cols = ['OH_{}_{}'.format(i, c) for i, c in enumerate(
-        list(OHenc.active_features_))]
-
-    OH_train = OHenc.transform(_train.loc[:, _cols])
-    OH_test = OHenc.transform(_test.loc[:, _cols])
-
-    encoded_train_frame = pd.DataFrame(OH_train.toarray(),
-                                       columns=OH_cols,
-                                       dtype=np.uint8)
-    encoded_test_frame = pd.DataFrame(OH_test.toarray(),
-                                      columns=OH_cols,
-                                      dtype=np.uint8)
-    # todo: Dont drop them for decision tree models! (this induces more
-    # weight on categorical features though)
-    #_train.drop(_cols, axis=1, inplace=True)
-    #_test.drop(_cols, axis=1, inplace=True)
-
-    _train = pd.concat([encoded_train_frame, _train], axis=1)
-    _test = pd.concat([encoded_test_frame, _test], axis=1)
-    del OHenc, OH_train, OH_test
-    del encoded_test_frame, encoded_train_frame; gc.collect()
-    return _train, _test
-
-
 def apply_parallel(df_groups, _func):
     nthreads = multiprocessing.cpu_count()  # >> 1
     print("nthreads: {}".format(nthreads))
@@ -168,46 +122,9 @@ def apply_parallel(df_groups, _func):
     return pd.concat(res)
 
 
-def get_decomp_feats(n_comp, _train, _test, rand_state):
-    """Get decomposition features from given train and test.
-
-    :param n_comp: number components to produce.
-    :param _train: training dataframe
-    :param _test: test dataframe
-    :param rand_state: random State
-    :return: decomposed featuers as df
-    """
-    print('get decomp features...')
-    decomp_dict = {'tsvd': TruncatedSVD,
-                   'pca': PCA,
-                   'ica': FastICA,
-                   'grp': GaussianRandomProjection,
-                   'srp': SparseRandomProjection,
-                   }
-    decomp_params = {'n_components': n_comp,
-                     'random_state': rand_state,
-                     }
-    train_decomps = pd.DataFrame()
-    test_decomps = pd.DataFrame()
-
-    for lbl, decomp_func in decomp_dict.items():
-        if lbl == 'grp':
-            mdl = decomp_func(eps=0.1, **decomp_params)
-        elif lbl == 'srp':
-            mdl = decomp_func(dense_output=True, **decomp_params)
-        else:
-            mdl = decomp_func(**decomp_params)
-        res_train = mdl.fit_transform(_train)
-        res_test = mdl.transform(_test)
-        for i in range(1, n_comp + 1):
-            train_decomps[lbl+'_{}'.format(i)] = res_train[:, i -1].tolist()
-            test_decomps[lbl+'_{}'.format(i)] = res_test[:, i - 1].tolist()
-
-    gc.collect()
-    return train_decomps, test_decomps
-
-
 if __name__ == '__main__':
+    print('load data...')
+
     train = pd.read_csv('input/train.csv', na_values="-1")
     test = pd.read_csv('input/test.csv', na_values="-1")
 
@@ -216,121 +133,32 @@ if __name__ == '__main__':
         train = train.iloc[:100, :]
         test = test.iloc[:100, :]
 
-    feat_engi = feature_engineering.FeatureEngineer(train, test)
+    # todo: enable expanded dataset loading and saving
+    feat_engi = feature_engineering.FeatureEngineer(train, test, SEED)
+    feat_engi.clean_data()
+    feat_engi.update_col_lists()
+    print('Engineer features...')
+    feat_engi.add_nan_per_row()
+    feat_engi.add_ind_19()
+    feat_engi.fillna()
+    feat_engi.accum_bins(do_accumulate=ACCUMULATE_BINS_FLAG)
+    feat_engi.combine_float_features()
+    feat_engi.one_hot_encode()
     feat_engi.clean_data()
 
-    print('Clean data..')
-    # drop calc features (seem useless)
-    calc_cols = [c for c in train.columns if '_calc_' in c]
-    train.drop(calc_cols, axis=1, inplace=True)
-    test.drop(calc_cols, axis=1, inplace=True)
-
-    # store column lists
-    categorical_cols = [c for c in train.columns if c.endswith('cat')]
-    binary_cols = [c for c in train.columns if c.endswith('bin')]
-    cols_to_use = [c for c in train.columns if c not in ['id', 'target']]
-    floating_cols = [c for c in cols_to_use if c not in
-                     (binary_cols+categorical_cols)]
-
-    # amount of NaNs
-    train['NaN_amount'] = train[cols_to_use].isnull().sum(axis=1)
-    test['NaN_amount'] = test[cols_to_use].isnull().sum(axis=1)
-
-    # invent ps_ind_19_bin for tracking where 16,17,18 are all zeros
-    train['ps_ind_19_bin'] = ~train[['ps_ind_16_bin', 'ps_ind_17_bin',
-                                     'ps_ind_18_bin']].sum(axis=1)
-    test['ps_ind_19_bin'] = ~test[['ps_ind_16_bin', 'ps_ind_17_bin',
-                                   'ps_ind_18_bin']].sum(axis=1)
-    assert train[['ps_ind_'+str(s)+'_bin' for s in (16, 17, 18, 19)]].sum(
-        axis=1).unique().shape[0] == 1, 'snap!'
-    # ps_ind_ 6-9 _bin and _16-18+19_bin are already one hot encoded!
-    already_oh_encoded = ['ps_ind_06_bin', 'ps_ind_07_bin', 'ps_ind_08_bin',
-                          'ps_ind_09_bin', 'ps_ind_16_bin', 'ps_ind_17_bin',
-                          'ps_ind_18_bin']
-    [binary_cols.remove(a) for a in already_oh_encoded]
-
-    # fill NaNs
-    for col in categorical_cols:
-        # todo: Evaluate: New category or mode[0] ?
-        train[col].fillna(value=train[col].mode()[0], inplace=True)
-        test[col].fillna(value=test[col].mode()[0], inplace=True)
-    for col in binary_cols:
-        train[col].fillna(value=train[col].mode()[0], inplace=True)
-        test[col].fillna(value=test[col].mode()[0], inplace=True)
-    for col in floating_cols:
-        train[col].fillna(value=train[col].mean(), inplace=True)
-        test[col].fillna(value=test[col].mean(), inplace=True)
-
-    print('Engineer features...')
-    # cumulative sum of binaries
-    train['sum_of_all_bins'] = train[binary_cols].sum(axis=1)
-    test['sum_of_all_bins'] = test[binary_cols].sum(axis=1)
-
-    # accumulate only if it doesnt puff out ram
-    if len(binary_cols) < 5 and ACCUMULATE_BINS_FLAG:
-        print('accumulate', ', '.join(binary_cols))
-        for j in range(2, len(binary_cols)):
-            comb_list = list(combinations(binary_cols, j))
-            for c in comb_list:
-                train['+'.join(c)] = train[list(c)].sum(axis=1)
-                test['+'.join(c)] = test[list(c)].sum(axis=1)
-
-    # combine floating point features excessively
-    for c1, c2 in float_combs:
-        lbl = c1+'x'+c2
-        train[lbl] = train[c1]*train[c2]
-        test[lbl] = test[c1]*test[c2]
-        floating_cols.append(lbl)
-
-    # one hot encode
-    train, test = one_hot_encode(train, test, categorical_cols)
-    cols_to_use = [c for c in train.columns if c not in ['id', 'target']]
-
-    # mean range (magic feature no. 2)
-    d_median = train.median(axis=0)
-    d_mean = train.mean(axis=0)
-    for c in floating_cols:
-        lbl_med = c + '_exceeds_median'
-        lbl_mean = c + '_exceeds_mean'
-        train[lbl_med] = (train[c].values > d_median[c]).astype(int)
-        test[lbl_med] = (test[c].values > d_median[c]).astype(int)
-        train[lbl_mean] = (train[c].values > d_mean[c]).astype(int)
-        test[lbl_mean] = (test[c].values > d_mean[c]).astype(int)
-        binary_cols.append(lbl_med)
-        binary_cols.append(lbl_mean)
-    del d_median, d_mean; gc.collect()
-
-    # drop single-cardinality cols
-    for x in train.columns:
-        cardinality = len(train[x].unique())
-        if cardinality == 1:
-            train.drop(x, axis=1, inplace=True)
-            test.drop(x, axis=1, inplace=True)
-            print('drop column: ', x)
-
     print('start reducing... round 1')
-    reducer = reducing.Reducer()
-    train = reducer.reduce(train, verbose=False)
-    test = reducer.reduce(test, verbose=False)
+    feat_engi.reduce_mem_usage()
 
     if DECOMP_FLAG:
-        train_decomp, test_decomp = get_decomp_feats(N_COMP_PREPROCESSING,
-                                          train[floating_cols],
-                                          test[floating_cols],
-                                          SEED)
-        train = pd.concat([train, train_decomp], axis=1)
-        test = pd.concat([test, test_decomp], axis=1)
-
+        print('add decomp features...')
+        feat_engi.add_decomp_feats(N_COMP_PREPROCESSING)
         print('start reducing... round 2')
-        train = reducer.reduce(train, verbose=False)
-        test = reducer.reduce(test, verbose=False)
+        feat_engi.reduce_mem_usage()
 
-        del train_decomp, test_decomp; gc.collect()
-
-    assert train.shape[1] == len(list(set(train.columns))), \
-        'duplicate cols present'
-
-    expanded_cols = [c for c in train.columns if c not in ['id', 'target']]
+    
+    # Train models
+    feat_engi.update_col_lists()
+    expanded_cols = feat_engi.cols_to_use
 
     skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
     gini_sklearn_metric = metrics.make_scorer(ngini, True, True)
@@ -395,6 +223,5 @@ ps_car_14
 ps_car_15
 """
 
-# todo: get parallel df transformation script from forza baseline
-# todo: build FeatureEngineerClass and let him select like below:
+# todo: Feature baggin!
 # https://www.kaggle.com/c/mercedes-benz-greener-manufacturing/discussion/36390
