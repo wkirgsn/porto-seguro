@@ -6,17 +6,19 @@ import multiprocessing
 from joblib import Parallel, delayed
 import gc
 import uuid
-from os.path import join
+from os.path import join, isdir, exists
+from os import makedirs
 
 import pandas as pd
 from catboost import CatBoostClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import ElasticNetCV, LassoLarsCV
-from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.utils import check_array
 from sklearn.base import BaseEstimator,TransformerMixin, ClassifierMixin
 from sklearn import metrics
+from dask import dataframe as dd
+from dask import multiprocessing as dmp
 
 from kirgsn import feature_engineering
 
@@ -26,10 +28,13 @@ TESTSPLITS = int(1 / TESTSIZE)
 N_COMP_PREPROCESSING = 10
 DEBUG_FLAG = False
 DECOMP_FLAG = True
-ACCUMULATE_BINS_FLAG = True
-LOAD_FEATS = True
+ACCUMULATE_BINS_FLAG = False
+LOAD_FEATS = False
+SAVE_FEATS = False
 
 cat_folder = 'cat_training'
+path_input = 'input'
+path_input_extended = join('input', 'extended')
 path_feature_importances = join('out', 'feature_importance')
 path_models = join('out', 'models')
 path_submissions = join('out', 'submissions')
@@ -113,53 +118,74 @@ def gini_lgb(actuals, preds):
 gini_sklearn = metrics.make_scorer(ngini, True, True)
 
 
-def apply_parallel(df_groups, _func):
-    nthreads = multiprocessing.cpu_count()  # >> 1
-    print("nthreads: {}".format(nthreads))
-
-    res = Parallel(n_jobs=nthreads)(delayed(_func)(grp.copy()) for _, grp
-                                    in df_groups)
-    return pd.concat(res)
-
-
 if __name__ == '__main__':
     print('load data...')
+    if LOAD_FEATS:
+        # load already expanded data set
+        train_file = join(path_input_extended, 'train.csv')
+        test_file = join(path_input_extended, 'test.csv')
+        if not exists(train_file) or not exists(test_file):
+            # abort loading
+            LOAD_FEATS = False
+        else:
+            train = dd.read_csv(train_file, blocksize=1e6)
+            test = dd.read_csv(test_file, blocksize=1e6)
+            train = train.compute(get=dmp.get)  # convert to pandas
+            test = test.compute(get=dmp.get)
+            if DEBUG_FLAG:
+                train = train.iloc[:100, :]
+                test = test.iloc[:100, :]
+            expanded_cols = [c for c in train.columns if c not in ('target',
+                                                                   'id')]
+            bag_engi = feature_engineering.BaggingEngineer(train, test, SEED)
+            bag_engi.bag_around()
+            [print(a) for a in bag_engi.top_feats]
 
-    train = pd.read_csv('input/train.csv', na_values="-1")
-    test = pd.read_csv('input/test.csv', na_values="-1")
+    if not LOAD_FEATS:
+        train = pd.read_csv(join(path_input, 'train.csv'), na_values="-1")
+        test = pd.read_csv(join(path_input, 'test.csv'), na_values="-1")
 
-    # debug
-    if DEBUG_FLAG:
-        train = train.iloc[:100, :]
-        test = test.iloc[:100, :]
+        # debug
+        if DEBUG_FLAG:
+            train = train.iloc[:100, :]
+            test = test.iloc[:100, :]
 
-    # todo: enable expanded dataset loading and saving
-    feat_engi = feature_engineering.FeatureEngineer(train, test, SEED)
-    feat_engi.clean_data()
-    feat_engi.update_col_lists()
-    print('Engineer features...')
-    feat_engi.add_nan_per_row()
-    feat_engi.add_ind_19()
-    feat_engi.fillna()
-    feat_engi.accum_bins(do_accumulate=ACCUMULATE_BINS_FLAG)
-    feat_engi.combine_float_features()
-    feat_engi.one_hot_encode()
-    feat_engi.clean_data()
-
-    print('start reducing... round 1')
-    feat_engi.reduce_mem_usage()
-
-    if DECOMP_FLAG:
-        print('add decomp features...')
-        feat_engi.add_decomp_feats(N_COMP_PREPROCESSING)
-        print('start reducing... round 2')
+        feat_engi = feature_engineering.FeatureEngineer(train, test, SEED)
+        print('Engineer features...')
+        feat_engi.clean_data()
+        feat_engi.add_nan_per_row()
+        feat_engi.add_ind_19()
+        feat_engi.transform_high_cardinalities()
+        feat_engi.fillna()
+        if ACCUMULATE_BINS_FLAG:
+            feat_engi.accum_bins()
+        feat_engi.combine_float_features()
+        feat_engi.one_hot_encode()
+        feat_engi.clean_data()
+        print('start reducing... round 1')
         feat_engi.reduce_mem_usage()
+        if DECOMP_FLAG:
+            print('add decomp features...')
+            feat_engi.add_decomp_feats(N_COMP_PREPROCESSING)
+            print('start reducing... round 2')
+            #feat_engi.reduce_mem_usage()
 
-    
+        expanded_cols = feat_engi.cols_to_use
+        train, test = feat_engi.train, feat_engi.test
+
+        # dump extended data features
+        if SAVE_FEATS:
+            print('dump features...')
+            if not isdir(path_input_extended): makedirs(path_input_extended)
+            train.to_csv(join(path_input_extended, 'train.csv'), index=False,
+                         float_format='%.5f')
+            test.to_csv(join(path_input_extended, 'test.csv'), index=False,
+                        float_format='%.5f')
+
     # Train models
-    feat_engi.update_col_lists()
-    expanded_cols = feat_engi.cols_to_use
-
+    # todo: upsampling, avg of three boosters
+    # todo: ensemble as below:
+    # https://www.kaggle.com/yekenot/simple-stacker-lb-0-284/code
     skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
     gini_sklearn_metric = metrics.make_scorer(ngini, True, True)
 
@@ -223,5 +249,4 @@ ps_car_14
 ps_car_15
 """
 
-# todo: Feature baggin!
-# https://www.kaggle.com/c/mercedes-benz-greener-manufacturing/discussion/36390
+# todo: use the rank of model predictions to average among them and submit

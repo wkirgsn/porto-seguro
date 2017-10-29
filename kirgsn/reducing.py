@@ -71,7 +71,7 @@ class Reducer:
         if s.isnull().any():
             if verbose:
                 print(colname, 'has NaNs - Skip..')
-            return
+            return s
         # detect kind of type
         coltype = s.dtype
         if np.issubdtype(coltype, np.integer):
@@ -81,7 +81,7 @@ class Reducer:
         else:
             if verbose:
                 print(colname, 'is', coltype, '- Skip..')
-            return
+            return s
         # find right candidate
         for cand, cand_info in self._type_candidates(conv_key):
             if s.max() <= cand_info.max and s.min() >= cand_info.min:
