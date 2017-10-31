@@ -1,5 +1,5 @@
 """
-Author: Kirgsn, 2017
+Author: Kirgsn, 2017, https://www.kaggle.com/wkirgsn
 """
 import pandas as pd
 import numpy as np
@@ -18,6 +18,8 @@ from sklearn.ensemble import RandomForestClassifier as RFC
 
 from kirgsn import reducing
 
+
+__Author__ = 'Kirgsn: https://www.kaggle.com/wkirgsn'
 
 class Engineer:
     def __init__(self, train_df, test_df, seed=None):
@@ -58,8 +60,8 @@ class Engineer:
 
     def update_col_lists(self):
         self.categorical_cols = \
-            [c for c in self.train.columns if c.endswith('cat')]
-        self.binary_cols = [c for c in self.train.columns if c.endswith('bin')]
+            [c for c in self.train.columns if c.endswith('_cat')]
+        self.binary_cols = [c for c in self.train.columns if c.endswith('_bin')]
         self.oh_cols = [c for c in self.train.columns if c.endswith('_oh')]
         self.cols_to_use = \
             [c for c in self.train.columns if c not in ['id', 'target']]
@@ -89,8 +91,8 @@ class FeatureEngineer(Engineer):
 
         # drop single-cardinality cols
         cardinalities = (len(self.train[x].unique()) for x in self.cols_to_use)
-        single_card_cols = compress(self.cols_to_use,
-                                    (card == 1 for card in cardinalities))
+        single_card_cols = list(compress(self.cols_to_use,
+                                         (card == 1 for card in cardinalities)))
         for frame in (self.train, self.test):
             frame.drop(single_card_cols, axis=1, inplace=True)
         [print('drop column: ', x) for x in single_card_cols]
@@ -99,6 +101,7 @@ class FeatureEngineer(Engineer):
     def reduce_mem_usage(self):
         self.train = self.reducer.reduce(self.train)
         self.test = self.reducer.reduce(self.test)
+        self.update_col_lists()
 
     def add_nan_per_row(self):
         """add amount of NaNs per row as new feature"""
@@ -160,22 +163,25 @@ class FeatureEngineer(Engineer):
             with Parallel(n_jobs=cpu_count()) as prll:
                 for j in range(2, len(self.binary_cols)):
                     comb_list = list(combinations(self.binary_cols, j))
+                    accum_cols = ['+'.join(c) for c in comb_list]
+
                     # parallelization somehow not effective here
                     for frame in (self.test, self.train):
                         ret_list = prll(delayed(self._get_sum)(frame, c_pair)
                                         for c_pair in comb_list)
-
-                        frame[['+'.join(c) for c in comb_list]] = \
+                        frame[['{}_accum'.format(c) for c in accum_cols]] = \
                             pd.concat(ret_list, axis=1)
+
         else:
             print('dont accumulate bins as there are too many:',
                   len(self.binary_cols))
             [print(c) for c in self.binary_cols]
-        # todo: change cols to end with 'accum'
+
         self.update_col_lists()
 
     def combine_float_features(self):
         # add interaction variables
+        print('add interaction variables..')
         for frame in (self.train, self.test):
             poly = PolynomialFeatures(degree=2, interaction_only=False,
                                       include_bias=False)
@@ -185,18 +191,20 @@ class FeatureEngineer(Engineer):
 
             interactions_df = pd.DataFrame(data=poly_feats_obj,
                                            columns=inter_cols)
-
+            # strange way to append but nothing else worked
             frame[interactions_df.columns] = \
                 pd.concat([interactions_df[c] for c in
                            interactions_df.columns], axis=1)
-
         self.update_col_lists()
 
         # arithmetic shenanigans
-        for c in self.floating_cols:
-            for df in (self.train, self.test):
-                df[c+str('_log')] = np.log(np.abs(df[c].values) + 1)
-                df[c+str('_exp')] = np.exp(df[c].values) - 1
+        print('add logs and exponentials..')
+        for df in (self.train, self.test):
+            for c in self.floating_cols:
+                df[c+str('_log')] = np.log(np.abs(df[c].values) + 1).astype(
+                    np.float32)
+                """df[c+str('_exp')] = np.exp(df[c].values).astype(
+                    np.float32) - 1"""
         self.update_col_lists()
 
     def one_hot_encode(self):
@@ -224,6 +232,7 @@ class FeatureEngineer(Engineer):
         self.update_col_lists()
 
     def add_decomp_feats(self, n_comp):
+        assert all(s in self.train.columns for s in self.floating_cols), 'snap!'
 
         decomp_params = {'n_components': n_comp,
                          'random_state': self.rand_state,
@@ -403,6 +412,10 @@ class BaggingEngineer(Engineer):
                     self.weights = np.delete(self.weights,
                                              [i for i, _ in new_feats])
                     self.weights /= np.sum(self.weights)
+
+
+class SelectionEngineer(Engineer):
+    pass
 
 
 class EnsembleEngineer(Engineer):

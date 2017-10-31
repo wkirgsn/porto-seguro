@@ -59,7 +59,7 @@ class Reducer:
         :param verbose: If True, outputs more information
         :return: pandas dataframe with reduced data types
         """
-        ret_list = Parallel(n_jobs=cpu_count())(delayed(self._reduce)
+        ret_list = Parallel(n_jobs=-1)(delayed(self._reduce)
                                                 (df[c], c, verbose) for c in
                                                 df.columns)
         del df
@@ -71,6 +71,7 @@ class Reducer:
         if s.isnull().any():
             if verbose:
                 print(colname, 'has NaNs - Skip..')
+            print(colname, 'has NaNs - Skip..')
             return s
         # detect kind of type
         coltype = s.dtype
@@ -81,6 +82,7 @@ class Reducer:
         else:
             if verbose:
                 print(colname, 'is', coltype, '- Skip..')
+            print(colname, 'is', coltype, '- Skip..')
             return s
         # find right candidate
         for cand, cand_info in self._type_candidates(conv_key):
@@ -89,4 +91,11 @@ class Reducer:
                 if verbose:
                     print('convert', colname, 'to', str(cand))
                 return s.astype(cand)
+
+        # reaching this code is bad. Probably there are inf, or other high numbs
+        print(("WARNING: {} " 
+               "doesn't fit the grid with \nmax: {} "
+               "and \nmin: {}").format(colname, s.max(), s.min()))
+        print('Dropping it..')
+
 

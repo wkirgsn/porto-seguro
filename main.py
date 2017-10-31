@@ -17,6 +17,8 @@ from sklearn.pipeline import make_pipeline
 from sklearn.utils import check_array
 from sklearn.base import BaseEstimator,TransformerMixin, ClassifierMixin
 from sklearn import metrics
+from sklearn.feature_selection import RFECV
+from sklearn.ensemble import RandomForestClassifier as RFC
 from dask import dataframe as dd
 from dask import multiprocessing as dmp
 
@@ -137,9 +139,6 @@ if __name__ == '__main__':
                 test = test.iloc[:100, :]
             expanded_cols = [c for c in train.columns if c not in ('target',
                                                                    'id')]
-            bag_engi = feature_engineering.BaggingEngineer(train, test, SEED)
-            bag_engi.bag_around()
-            [print(a) for a in bag_engi.top_feats]
 
     if not LOAD_FEATS:
         train = pd.read_csv(join(path_input, 'train.csv'), na_values="-1")
@@ -168,7 +167,7 @@ if __name__ == '__main__':
             print('add decomp features...')
             feat_engi.add_decomp_feats(N_COMP_PREPROCESSING)
             print('start reducing... round 2')
-            #feat_engi.reduce_mem_usage()
+            feat_engi.reduce_mem_usage()
 
         expanded_cols = feat_engi.cols_to_use
         train, test = feat_engi.train, feat_engi.test
@@ -182,6 +181,38 @@ if __name__ == '__main__':
             test.to_csv(join(path_input_extended, 'test.csv'), index=False,
                         float_format='%.5f')
 
+
+    print('start selection..')
+    folds = 5
+    step = 2
+
+    rfc = RFC(n_estimators=100, max_features='sqrt', max_depth=10, n_jobs=4)
+    skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
+    X = feat_engi.train[feat_engi.cols_to_use].values
+    y = feat_engi.train['target'].values
+    rfecv = RFECV(
+        estimator=rfc,
+        step=step,
+        cv=skf.split(X, y),
+        scoring='roc_auc',
+        n_jobs=-1,
+        verbose=2)
+
+    rfecv.fit(X, y)
+
+    print('\n Optimal number of features: {}'.format(rfecv.n_features_))
+    sel_features = \
+        [f for f, s in zip(feat_engi.cols_to_use, rfecv.support_) if s]
+    print('\n The selected features are {}:'.format(sel_features))
+
+    test['target'] = \
+        rfecv.predict_proba(feat_engi.test[sel_features])[:, 1]
+    test[['id', 'target']].to_csv(join(path_submissions,
+                                       'rfecv_first_shot.csv.gz'),
+                                  index=False,
+                                  float_format='%.5f',
+                                  compression='gzip')
+"""
     # Train models
     # todo: upsampling, avg of three boosters
     # todo: ensemble as below:
@@ -227,7 +258,7 @@ if __name__ == '__main__':
               index=expanded_cols).to_csv(join(path_feature_importances,
                                                'feat_importances_{}.csv'.format(
                                                    script_run_id)))
-
+"""
 """
 Boruta package recommends:
 Only these features are not noise:
