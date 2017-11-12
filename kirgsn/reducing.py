@@ -6,7 +6,7 @@ import pandas as pd
 import time
 import gc
 from joblib import Parallel, delayed
-from multiprocessing import cpu_count
+from multiprocessing import Pool
 
 
 def measure_time_mem(func):
@@ -24,6 +24,11 @@ def measure_time_mem(func):
         gc.collect()
         return ret
     return wrapped_reduce
+
+
+"""def opt_mem(func):
+    def open_in_one_process(self, df, verbose):
+        return Pool(1).map(func, [*args, **kwargs])[0]"""
 
 
 class Reducer:
@@ -59,9 +64,10 @@ class Reducer:
         :param verbose: If True, outputs more information
         :return: pandas dataframe with reduced data types
         """
-        ret_list = Parallel(n_jobs=-1)(delayed(self._reduce)
+        ret_list = Parallel(n_jobs=1)(delayed(self._reduce)
                                                 (df[c], c, verbose) for c in
                                                 df.columns)
+
         del df
         gc.collect()
         return pd.concat(ret_list, axis=1)

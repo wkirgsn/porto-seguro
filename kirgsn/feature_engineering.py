@@ -8,11 +8,11 @@ import gc
 from joblib import Parallel, delayed
 from multiprocessing import cpu_count
 
-from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.random_projection import GaussianRandomProjection
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.decomposition import PCA, FastICA, TruncatedSVD
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import roc_auc_score
 from sklearn.ensemble import RandomForestClassifier as RFC
 
@@ -20,6 +20,7 @@ from kirgsn import reducing
 
 
 __Author__ = 'Kirgsn: https://www.kaggle.com/wkirgsn'
+
 
 class Engineer:
     def __init__(self, train_df, test_df, seed=None):
@@ -40,15 +41,6 @@ class Engineer:
         self.update_col_lists()
 
         self.rand_state = seed
-        # combinations for multiplied float features
-        self.float_combs = [('ps_car_13', 'ps_reg_03'),  # magic
-                            # following had high pearson corr
-                            ('ps_reg_01', 'ps_reg_02'),
-                            ('ps_reg_01', 'ps_reg_03'),
-                            ('ps_reg_02', 'ps_reg_03'),
-                            ('ps_car_12', 'ps_car_13'),
-                            ('ps_car_13', 'ps_car_15'),
-                            ]
 
         self.decomp_dict = {'tsvd': TruncatedSVD,
                             'pca': PCA,
@@ -99,6 +91,7 @@ class FeatureEngineer(Engineer):
         self.update_col_lists()
 
     def reduce_mem_usage(self):
+        print('reducing mem size...')
         self.train = self.reducer.reduce(self.train)
         self.test = self.reducer.reduce(self.test)
         self.update_col_lists()
@@ -198,14 +191,14 @@ class FeatureEngineer(Engineer):
         self.update_col_lists()
 
         # arithmetic shenanigans
-        print('add logs and exponentials..')
-        for df in (self.train, self.test):
-            for c in self.floating_cols:
-                df[c+str('_log')] = np.log(np.abs(df[c].values) + 1).astype(
-                    np.float32)
-                """df[c+str('_exp')] = np.exp(df[c].values).astype(
-                    np.float32) - 1"""
-        self.update_col_lists()
+        """print('add logs and exponentials..')
+for df in (self.train, self.test):
+    for c in self.floating_cols:
+        df[c+str('_log')] = np.log(np.abs(df[c].values) + 1).astype(
+            np.float32)
+        df[c+str('_exp')] = np.exp(df[c].values).astype(
+            np.float32) - 1
+        self.update_col_lists()"""
 
     def one_hot_encode(self):
 
@@ -329,6 +322,17 @@ class FeatureEngineer(Engineer):
             frame.drop(high_card_cols, axis=1, inplace=True)
         self.update_col_lists()
 
+    def scale(self):
+        print('scale features..')
+        scaler = StandardScaler()
+        scaler.fit(self.train[self.floating_cols])
+        for frame in (self.train, self.test):
+            scaled = scaler.transform(frame[self.floating_cols])
+            scaled_df = pd.DataFrame(data=scaled, columns=self.floating_cols)
+            frame[self.floating_cols] = pd.concat([scaled_df[c] for c in
+                                                   self.floating_cols], axis=1)
+        gc.collect()
+
 
 class BaggingEngineer(Engineer):
     """This class is probably obsolete due to the existence of
@@ -352,7 +356,7 @@ class BaggingEngineer(Engineer):
         best_feats = []
         best_score = 0
         epochs = 3000
-        bag_size = 30  # todo: optimize
+        bag_size = 30
         w_growth_rate = .2
         w_thresh = .2
         kfold_splits = 5
@@ -415,9 +419,50 @@ class BaggingEngineer(Engineer):
 
 
 class SelectionEngineer(Engineer):
-    pass
+    def select(self):
+        print('start selection..')
+        folds = 5
+        step = 5
+
+        rfc = RFC(n_estimators=50, max_features='sqrt', max_depth=10, n_jobs=4)
+        skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
+        X = feat_engi.train[feat_engi.cols_to_use].values
+        y = feat_engi.train['target'].values
+        rfecv = RFECV(
+            estimator=rfc,
+            step=step,
+            cv=skf.split(X, y),
+            scoring='roc_auc',
+            n_jobs=-1,
+            verbose=2)
+
+        rfecv.fit(X, y)
+
+        print('\n Optimal number of features: {}'.format(rfecv.n_features_))
+        sel_features = \
+            [f for f, s in zip(feat_engi.cols_to_use, rfecv.support_) if s]
+        print('\n The selected features are {}:'.format(sel_features))
+
+        test['target'] = \
+            rfecv.predict_proba(feat_engi.test[sel_features])[:, 1]
+        test[['id', 'target']].to_csv(join(path_submissions,
+                                           'rfecv_first_shot.csv.gz'),
+                                      index=False,
+                                      float_format='%.5f',
+                                      compression='gzip')
 
 
-class EnsembleEngineer(Engineer):
-    # todo: implement
-    pass
+gold_features = ['ps_ind_17_oh', 'ps_car_13', 'ps_ind_03xps_car_13',
+                 'ps_reg_02xps_car_13', 'ps_reg_03xps_car_13',
+                 'ps_reg_03xps_car_11_micci', 'ps_reg_03xps_car_11_woe',
+                 'ps_car_12xps_car_13', 'ps_car_13xps_car_11_micci',
+                 'ps_car_13xps_car_11_woe', 'ps_ind_03xps_car_13_log',
+                 'ps_reg_01xps_car_13_log', 'ps_reg_02xps_car_13_log',
+                 'ps_reg_03xps_car_13_log', 'ps_reg_03xps_car_11_micci_log',
+                 'ps_car_12xps_car_13_log', 'ps_car_13^2_log',
+                 'ps_car_13xps_car_11_micci_log',
+                 'ps_car_13xps_car_11_woe_log',
+                 'ps_ind_05_0.0', 'grp_3', 'grp_9', 'grp_10', 'srp_2',
+                 'srp_3', 'srp_5', 'srp_6', 'srp_7', 'srp_8', 'srp_10',
+                 'ica_1', 'ica_3', 'ica_6', 'ica_8', 'ica_9', 'ica_10',
+                 'pca_1', 'pca_2', 'pca_3', 'pca_7', 'tsvd_2', 'tsvd_8']

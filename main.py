@@ -3,7 +3,6 @@ Author: WKirgsn, 2017
 """
 import numpy as np
 import multiprocessing
-from joblib import Parallel, delayed
 import gc
 import uuid
 from os.path import join, isdir, exists
@@ -11,8 +10,8 @@ from os import makedirs
 
 import pandas as pd
 from catboost import CatBoostClassifier
-from sklearn.model_selection import StratifiedKFold
-from sklearn.linear_model import ElasticNetCV, LassoLarsCV
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.linear_model import ElasticNetCV, LassoLarsCV, LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.utils import check_array
 from sklearn.base import BaseEstimator,TransformerMixin, ClassifierMixin
@@ -21,8 +20,13 @@ from sklearn.feature_selection import RFECV
 from sklearn.ensemble import RandomForestClassifier as RFC
 from dask import dataframe as dd
 from dask import multiprocessing as dmp
+import xgboost as xgb
+from lightgbm import LGBMClassifier
+from contextlib import closing
 
 from kirgsn import feature_engineering
+from kirgsn.model_training import the1owl_xgb, VladDemidovLGBMs,\
+    VladDemidovEnsemble
 
 SEED = 1990
 TESTSIZE = 0.20
@@ -30,9 +34,9 @@ TESTSPLITS = int(1 / TESTSIZE)
 N_COMP_PREPROCESSING = 10
 DEBUG_FLAG = False
 DECOMP_FLAG = True
-ACCUMULATE_BINS_FLAG = False
+ACCUMULATE_BINS_FLAG = True
 LOAD_FEATS = False
-SAVE_FEATS = False
+SAVE_FEATS = True
 
 cat_folder = 'cat_training'
 path_input = 'input'
@@ -121,6 +125,7 @@ gini_sklearn = metrics.make_scorer(ngini, True, True)
 
 
 if __name__ == '__main__':
+
     print('load data...')
     if LOAD_FEATS:
         # load already expanded data set
@@ -161,13 +166,13 @@ if __name__ == '__main__':
         feat_engi.combine_float_features()
         feat_engi.one_hot_encode()
         feat_engi.clean_data()
-        print('start reducing... round 1')
-        feat_engi.reduce_mem_usage()
+        feat_engi.scale()
         if DECOMP_FLAG:
             print('add decomp features...')
             feat_engi.add_decomp_feats(N_COMP_PREPROCESSING)
-            print('start reducing... round 2')
-            feat_engi.reduce_mem_usage()
+
+        feat_engi.reduce_mem_usage()
+        feat_engi.scale()
 
         expanded_cols = feat_engi.cols_to_use
         train, test = feat_engi.train, feat_engi.test
@@ -181,12 +186,12 @@ if __name__ == '__main__':
             test.to_csv(join(path_input_extended, 'test.csv'), index=False,
                         float_format='%.5f')
 
-
+""" # select feats
     print('start selection..')
     folds = 5
-    step = 2
+    step = 4
 
-    rfc = RFC(n_estimators=100, max_features='sqrt', max_depth=10, n_jobs=4)
+    rfc = RFC(n_estimators=70, max_features='sqrt', max_depth=10, n_jobs=4)
     skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
     X = feat_engi.train[feat_engi.cols_to_use].values
     y = feat_engi.train['target'].values
@@ -206,17 +211,53 @@ if __name__ == '__main__':
     print('\n The selected features are {}:'.format(sel_features))
 
     test['target'] = \
-        rfecv.predict_proba(feat_engi.test[sel_features])[:, 1]
+        rfecv.predict_proba(feat_engi.test[feat_engi.cols_to_use])[:, 1]
     test[['id', 'target']].to_csv(join(path_submissions,
                                        'rfecv_first_shot.csv.gz'),
                                   index=False,
                                   float_format='%.5f',
                                   compression='gzip')
-"""
+
+
     # Train models
     # todo: upsampling, avg of three boosters
-    # todo: ensemble as below:
-    # https://www.kaggle.com/yekenot/simple-stacker-lb-0-284/code
+
+    # XGB modeling by the1Owl
+    test['target'] = the1owl_xgb(train, test, sel_features)
+    test['target'] = (np.exp(test['target'].values) - 1.0).clip(0, 1)
+    test[['id', 'target']].to_csv(join(path_submissions,
+                                       'xgb_sub.csv'), index=False,
+                                        float_format='%.5f')
+
+    # LGBM modeling by Vladimir Demidov
+    log_model = LogisticRegression()
+    lgbms = VladDemidovLGBMs()
+    stack = VladDemidovEnsemble(n_splits=3, stacker=log_model,
+                                  base_models=lgbms.get_models())
+
+    y_pred = stack.fit_predict(train[sel_features], train['target'],
+                               test[sel_features])
+
+    lgbsub = pd.DataFrame()
+    lgbsub['id'] = test['id'].values
+    lgbsub['target'] = y_pred
+    lgbsub.to_csv(join(path_submissions, 'lightgbm_sub.csv'), index=False,
+                  float_format='%.5f')
+
+    # blend
+    df1 = pd.read_csv(join(path_submissions, 'lightgbm_sub.csv'))
+    df2 = pd.read_csv(join(path_submissions, 'xgb_sub.csv'))
+    df2.columns = [x + '_' if x not in ['id'] else x for x in df2.columns]
+    blend = pd.merge(df1, df2, how='left', on='id')
+    for c in df1.columns:
+        if c != 'id':
+            blend[c] = (blend[c] * 0.07) + (blend[c + '_'] * 0.03)
+    blend = blend[df1.columns]
+    blend['target'] = (np.exp(blend['target'].values) - 1.0).clip(0, 1)
+    blend.to_csv(join(path_submissions, 'blend_sub_{}.csv.gz'.format(
+        script_run_id)), index=False, float_format='%.5f', compression='gzip')
+"""
+"""
     skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
     gini_sklearn_metric = metrics.make_scorer(ngini, True, True)
 
