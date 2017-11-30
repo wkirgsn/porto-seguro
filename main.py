@@ -40,7 +40,7 @@ SAVE_FEATS = True
 
 cat_folder = 'cat_training'
 path_input = 'input'
-path_input_extended = join('input', 'extended')
+path_input_extended = join(path_input, 'extended')
 path_feature_importances = join('out', 'feature_importance')
 path_models = join('out', 'models')
 path_submissions = join('out', 'submissions')
@@ -186,39 +186,6 @@ if __name__ == '__main__':
             test.to_csv(join(path_input_extended, 'test.csv'), index=False,
                         float_format='%.5f')
 
-""" # select feats
-    print('start selection..')
-    folds = 5
-    step = 4
-
-    rfc = RFC(n_estimators=70, max_features='sqrt', max_depth=10, n_jobs=4)
-    skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
-    X = feat_engi.train[feat_engi.cols_to_use].values
-    y = feat_engi.train['target'].values
-    rfecv = RFECV(
-        estimator=rfc,
-        step=step,
-        cv=skf.split(X, y),
-        scoring='roc_auc',
-        n_jobs=-1,
-        verbose=2)
-
-    rfecv.fit(X, y)
-
-    print('\n Optimal number of features: {}'.format(rfecv.n_features_))
-    sel_features = \
-        [f for f, s in zip(feat_engi.cols_to_use, rfecv.support_) if s]
-    print('\n The selected features are {}:'.format(sel_features))
-
-    test['target'] = \
-        rfecv.predict_proba(feat_engi.test[feat_engi.cols_to_use])[:, 1]
-    test[['id', 'target']].to_csv(join(path_submissions,
-                                       'rfecv_first_shot.csv.gz'),
-                                  index=False,
-                                  float_format='%.5f',
-                                  compression='gzip')
-
-
     # Train models
     # todo: upsampling, avg of three boosters
 
@@ -256,8 +223,7 @@ if __name__ == '__main__':
     blend['target'] = (np.exp(blend['target'].values) - 1.0).clip(0, 1)
     blend.to_csv(join(path_submissions, 'blend_sub_{}.csv.gz'.format(
         script_run_id)), index=False, float_format='%.5f', compression='gzip')
-"""
-"""
+
     skf = StratifiedKFold(n_splits=TESTSPLITS, random_state=SEED)
     gini_sklearn_metric = metrics.make_scorer(ngini, True, True)
 
@@ -299,7 +265,7 @@ if __name__ == '__main__':
               index=expanded_cols).to_csv(join(path_feature_importances,
                                                'feat_importances_{}.csv'.format(
                                                    script_run_id)))
-"""
+
 """
 Boruta package recommends:
 Only these features are not noise:

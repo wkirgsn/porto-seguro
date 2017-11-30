@@ -64,7 +64,7 @@ class Reducer:
         :param verbose: If True, outputs more information
         :return: pandas dataframe with reduced data types
         """
-        ret_list = Parallel(n_jobs=1)(delayed(self._reduce)
+        ret_list = Parallel(n_jobs=-1)(delayed(self._reduce)
                                                 (df[c], c, verbose) for c in
                                                 df.columns)
 

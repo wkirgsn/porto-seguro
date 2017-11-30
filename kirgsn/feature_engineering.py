@@ -328,7 +328,8 @@ for df in (self.train, self.test):
         scaler.fit(self.train[self.floating_cols])
         for frame in (self.train, self.test):
             scaled = scaler.transform(frame[self.floating_cols])
-            scaled_df = pd.DataFrame(data=scaled, columns=self.floating_cols)
+            scaled_df = pd.DataFrame(data=scaled, columns=self.floating_cols,
+                                     dtype=np.float32)
             frame[self.floating_cols] = pd.concat([scaled_df[c] for c in
                                                    self.floating_cols], axis=1)
         gc.collect()
