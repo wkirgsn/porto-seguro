@@ -14,7 +14,7 @@ if __name__ == '__main__':
 
     from kirgsn import reducing
 
-    path_input_extended = join('input', 'extended')
+    path_input_extended = 'input'
 
     tpot = TPOTClassifier(generations=10, population_size=40, verbosity=2,
                           scoring='roc_auc', cv=5, #max_time_mins=60*3,
